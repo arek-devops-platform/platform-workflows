@@ -1,0 +1,23 @@
+name: Docker Image Scan
+
+on:
+  workflow_call:
+
+jobs:
+  scan:
+    name: Trivy - Container Image Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t app-image:scan .
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: "app-image:scan"
+          format: "table"
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"
