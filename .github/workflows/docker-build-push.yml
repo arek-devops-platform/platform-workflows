@@ -1,0 +1,91 @@
+name: Docker Build, Scan, Push
+
+on:
+  workflow_call:
+    inputs:
+      acr-name:
+        description: "Azure Container Registry name (without .azurecr.io)"
+        required: true
+        type: string
+      image-name:
+        description: "Image name, e.g. app-demo"
+        required: true
+        type: string
+      context:
+        description: "Docker build context"
+        required: false
+        type: string
+        default: "."
+      azure-client-id:
+        description: "Azure AD App Registration client ID (OIDC, not a secret)"
+        required: true
+        type: string
+      azure-tenant-id:
+        description: "Azure AD tenant ID (OIDC, not a secret)"
+        required: true
+        type: string
+      azure-subscription-id:
+        description: "Azure subscription ID (OIDC, not a secret)"
+        required: true
+        type: string
+    outputs:
+      image:
+        description: "Full pushed image reference, e.g. myacr.azurecr.io/app-demo:<sha>"
+        value: ${{ jobs.build-scan-push.outputs.image }}
+      image-tag:
+        description: "The tag used (the triggering commit's Git SHA)"
+        value: ${{ jobs.build-scan-push.outputs.image-tag }}
+
+jobs:
+  build-scan-push:
+    name: "Build -> Scan -> Push"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.set-output.outputs.image }}
+      image-tag: ${{ steps.set-output.outputs.image-tag }}
+    env:
+      IMAGE: ${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ github.sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # Built once, tagged with the commit SHA. This exact image is what
+      # gets scanned below and, if it passes, pushed - never rebuilt again
+      # for DEV or PROD.
+      - name: Build Docker image
+        run: docker build -t ${{ env.IMAGE }} ${{ inputs.context }}
+
+      # Scans the real image that would be pushed, not a throwaway build.
+      # A failed step here stops the job before Azure is ever touched and
+      # before the push step runs - that IS the "only if scan passes, push"
+      # gate, enforced by GitHub Actions' default fail-fast behavior.
+      - name: Scan image with Trivy (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: "table"
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"
+
+      # Azure is only touched after the scan has already passed.
+      - name: Azure login (OIDC, no client secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Log in to ACR
+        run: az acr login --name ${{ inputs.acr-name }}
+
+      - name: Push Docker image to ACR
+        run: docker push ${{ env.IMAGE }}
+
+      - name: Set outputs
+        id: set-output
+        run: |
+          echo "image=${{ env.IMAGE }}" >> "$GITHUB_OUTPUT"
+          echo "image-tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
