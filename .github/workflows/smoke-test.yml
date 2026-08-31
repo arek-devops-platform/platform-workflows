@@ -1,0 +1,95 @@
+name: Smoke Test
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        description: "Kubernetes namespace to test against"
+        required: true
+        type: string
+      service-name:
+        description: "Service name to port-forward to"
+        required: false
+        type: string
+        default: "app-demo"
+      service-port:
+        description: "Service port to port-forward to"
+        required: false
+        type: number
+        default: 80
+      health-path:
+        description: "HTTP path to check"
+        required: false
+        type: string
+        default: "/health"
+      aks-resource-group:
+        description: "Resource group containing the AKS cluster"
+        required: true
+        type: string
+      aks-cluster-name:
+        description: "AKS cluster name"
+        required: true
+        type: string
+      azure-client-id:
+        description: "Azure AD App Registration client ID (OIDC, not a secret)"
+        required: true
+        type: string
+      azure-tenant-id:
+        description: "Azure AD tenant ID (OIDC, not a secret)"
+        required: true
+        type: string
+      azure-subscription-id:
+        description: "Azure subscription ID (OIDC, not a secret)"
+        required: true
+        type: string
+
+jobs:
+  smoke-test:
+    name: "Smoke Test: ${{ inputs.namespace }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    # Deliberately no "environment:" here - this job only verifies a
+    # deployment, it doesn't make one, so it doesn't need an
+    # environment-scoped OIDC subject. It authenticates via the same
+    # plain main-branch subject as build-and-push, which already has a
+    # working federated credential today.
+    steps:
+      - name: Azure login (OIDC, no client secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ inputs.aks-resource-group }} \
+            --name ${{ inputs.aks-cluster-name }} \
+            --overwrite-existing
+
+      # Runs independently of the deploy job's runner (each job gets a
+      # fresh machine) - this job gets its own kubeconfig from scratch,
+      # it never assumes anything persists from a previous job.
+      - name: Start port-forward
+        run: |
+          kubectl port-forward svc/${{ inputs.service-name }} 8080:${{ inputs.service-port }} \
+            -n ${{ inputs.namespace }} &
+          echo $! > pf.pid
+          sleep 5
+
+      - name: Curl health endpoint
+        run: |
+          curl --fail --silent --show-error --max-time 10 \
+            http://127.0.0.1:8080${{ inputs.health-path }}
+
+      # Runs even if the curl step above failed, so the port-forward
+      # process is never left behind.
+      - name: Stop port-forward
+        if: always()
+        run: |
+          if [ -f pf.pid ]; then
+            kill "$(cat pf.pid)" 2>/dev/null || true
+          fi

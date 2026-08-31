@@ -1,0 +1,104 @@
+name: Helm Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        description: "GitHub Environment to run this deployment job under (e.g. dev, prod) - this is what makes environment protection rules (approval, branch restriction) actually apply."
+        required: true
+        type: string
+      namespace:
+        description: "Kubernetes namespace to deploy into"
+        required: true
+        type: string
+      chart-path:
+        description: "Path to the Helm chart in the caller's repository"
+        required: true
+        type: string
+      values-file:
+        description: "Path to the environment-specific values file"
+        required: true
+        type: string
+      image-repository:
+        description: "Full image repository, e.g. myacr.azurecr.io/app-demo"
+        required: true
+        type: string
+      image-tag:
+        description: "Image tag to deploy - must be the same tag used for every environment (Build Once, Promote Many)"
+        required: true
+        type: string
+      aks-resource-group:
+        description: "Resource group containing the AKS cluster"
+        required: true
+        type: string
+      aks-cluster-name:
+        description: "AKS cluster name"
+        required: true
+        type: string
+      azure-client-id:
+        description: "Azure AD App Registration client ID (OIDC, not a secret)"
+        required: true
+        type: string
+      azure-tenant-id:
+        description: "Azure AD tenant ID (OIDC, not a secret)"
+        required: true
+        type: string
+      azure-subscription-id:
+        description: "Azure subscription ID (OIDC, not a secret)"
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: "Helm Deploy: ${{ inputs.environment-name }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    # Set HERE, inside the reusable workflow's own job - a caller job that
+    # uses "uses:" to invoke a reusable workflow cannot also declare
+    # "environment:" itself. This is what actually triggers GitHub's
+    # environment protection rules (dev: automatic, prod: required
+    # reviewer approval, main-only) before this job is allowed to run.
+    environment: ${{ inputs.environment-name }}
+    steps:
+      # Defaults to checking out the CALLER's repository (e.g. app-demo),
+      # not this platform-workflows repo - that's what gives access to
+      # the chart at inputs.chart-path.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Azure login (OIDC, no client secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ inputs.aks-resource-group }} \
+            --name ${{ inputs.aks-cluster-name }} \
+            --overwrite-existing
+
+      # Namespaces are Terraform-managed - deliberately no --create-namespace
+      # here, so this workflow never creates infrastructure Terraform owns.
+      - name: Helm upgrade --install
+        run: |
+          helm upgrade --install app-demo ${{ inputs.chart-path }} \
+            -f ${{ inputs.chart-path }}/values.yaml \
+            -f ${{ inputs.values-file }} \
+            --set image.repository=${{ inputs.image-repository }} \
+            --set image.tag=${{ inputs.image-tag }} \
+            -n ${{ inputs.namespace }} \
+            --wait \
+            --timeout 120s
+
+      - name: Show Helm release status
+        run: |
+          helm status app-demo -n ${{ inputs.namespace }}
+          helm list -n ${{ inputs.namespace }}
+
+      - name: Show pods
+        run: kubectl get pods -n ${{ inputs.namespace }} -o wide
